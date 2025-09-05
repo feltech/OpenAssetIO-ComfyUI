@@ -11,7 +11,8 @@ on:
       - main
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: comfy-org/node-diff@main
+  # TODO(DF): Re-enable once initial PR merged to set a baseline.
+#  validate:
+#    runs-on: ubuntu-latest
+#    steps:
+#      - uses: comfy-org/node-diff@main
