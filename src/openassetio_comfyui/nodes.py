@@ -13,6 +13,7 @@ import json
 import logging
 import pathlib
 import shutil
+import os
 
 import torch
 import numpy as np
@@ -34,10 +35,12 @@ from openassetio_mediacreation.specifications.twoDimensional import (
     PlanarBitmapImageResourceSpecification,
 )
 from openassetio_mediacreation.traits.content import LocatableContentTrait
+from openassetio_mediacreation.traits.timeDomain import FrameRangedTrait
 
 import folder_paths
 import node_helpers
 from comfy.cli_args import args
+from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
 
 
 class _OpenAssetIOHost:
@@ -404,6 +407,168 @@ class PublishImage:
         return {"ui": {"images": results}}
 
 
+class ResolveVideo(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ResolveVideo",
+            search_aliases=[
+                "import video",
+                "open video",
+                "video file",
+                "resolve video",
+            ],
+            display_name="OpenAssetIO Resolve Video",
+            category="image/video",
+            inputs=[
+                io.String.Input(
+                    "entity_reference",
+                    default="",
+                    tooltip="The enttiy reference to resolve from.",
+                ),
+            ],
+            outputs=[
+                io.Video.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, entity_reference) -> io.NodeOutput:
+        video_path = _OpenAssetIOHost.instance().resolve_to_path(entity_reference)
+        return io.NodeOutput(InputImpl.VideoFromFile(video_path))
+
+    @classmethod
+    def fingerprint_inputs(s, entity_reference):
+        video_path = _OpenAssetIOHost.instance().resolve_to_path(entity_reference)
+        mod_time = os.path.getmtime(video_path)
+        # Instead of hashing the file, we can just use the modification time to avoid
+        # rehashing large files.
+        return mod_time
+
+    @classmethod
+    def validate_inputs(s, entity_reference):
+        return _OpenAssetIOHost.instance().manager.isEntityReferenceString(
+            entity_reference
+        )
+
+
+class PublishVideo(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="PublishVideo",
+            search_aliases=["publish video"],
+            display_name="OpenAssetIO Publish Video",
+            category="image/video",
+            description="Publishes the input images to an asset manager via OpenAssetIO.",
+            inputs=[
+                io.Video.Input("video", tooltip="The video to save."),
+                io.String.Input(
+                    "entity_reference",
+                    default="",
+                    tooltip="The enttiy reference to publish to.",
+                ),
+                io.Combo.Input(
+                    "format",
+                    options=Types.VideoContainer.as_input(),
+                    default="auto",
+                    tooltip="The format to save the video as.",
+                ),
+                io.Combo.Input(
+                    "codec",
+                    options=Types.VideoCodec.as_input(),
+                    default="auto",
+                    tooltip="The codec to use for the video.",
+                ),
+            ],
+            hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
+            is_output_node=True,
+        )
+
+    @classmethod
+    def execute(
+        cls, video: Input.Video, entity_reference, format: str, codec
+    ) -> io.NodeOutput:
+        entity_reference = _OpenAssetIOHost.instance().manager.createEntityReference(
+            entity_reference
+        )
+
+        spec = PlanarBitmapImageResourceSpecification.create()
+
+        working_ref = _OpenAssetIOHost.instance().manager.preflight(
+            entity_reference,
+            spec.traitsData(),
+            PublishingAccess.kWrite,
+            _OpenAssetIOHost.instance().context,
+        )
+
+        # Get destination file path. This may be a temporary/staging
+        # path, or it may be the final path, depending on the manager's
+        # implementation.
+        file_path = _OpenAssetIOHost.instance().resolve_to_path(
+            working_ref, access_mode=ResolveAccess.kManagerDriven
+        )
+
+        width, height = video.get_dimensions()
+
+        saved_metadata = None
+        if not args.disable_metadata:
+            metadata = {}
+            if cls.hidden.extra_pnginfo is not None:
+                metadata.update(cls.hidden.extra_pnginfo)
+            if cls.hidden.prompt is not None:
+                metadata["prompt"] = cls.hidden.prompt
+            if len(metadata) > 0:
+                saved_metadata = metadata
+
+        video.save_to(
+            file_path,
+            format=Types.VideoContainer(format),
+            codec=codec,
+            metadata=saved_metadata,
+        )
+
+        url = _OpenAssetIOHost.instance().file_url_path_converter.pathToUrl(file_path)
+        spec.locatableContentTrait().setLocation(url)
+        traits_data = spec.traitsData()
+
+        end_frame = video.get_frame_count()
+        fps = video.get_frame_rate()
+        frame_ranged_trait = FrameRangedTrait(traits_data)
+        frame_ranged_trait.setStartFrame(0)
+        frame_ranged_trait.setInFrame(0)
+        frame_ranged_trait.setEndFrame(end_frame)
+        frame_ranged_trait.setOutFrame(0)
+        frame_ranged_trait.setStep(1)
+        frame_ranged_trait.setFramesPerSecond(float(fps))
+
+        # Publish the image to the working reference.
+        final_ref = _OpenAssetIOHost.instance().manager.register(
+            working_ref,
+            traits_data,
+            PublishingAccess.kWrite,
+            _OpenAssetIOHost.instance().context,
+        )
+        # Get the path of the published image. This may be different
+        # to the path resolved from the working reference (i.e. if
+        # the manager moved it as part of the publishing process).
+        final_file_path = pathlib.Path(
+            _OpenAssetIOHost.instance().resolve_to_path(final_ref)
+        )
+        # Copy to ComfyUI temp directory for display in the UI. For
+        # security reasons, ComfyUI does not allow images to be
+        # served from arbitrary paths on disk, so we must copy them
+        # to an allowed location. Here, we choose ComfyUI's temp
+        # directory.
+        shutil.copy2(final_file_path, folder_paths.get_temp_directory())
+
+        return io.NodeOutput(
+            ui=ui.PreviewVideo(
+                [ui.SavedResult(final_file_path.name, "", io.FolderType.temp)]
+            )
+        )
+
+
 # Plugin registration: node classes.
 NODE_CLASS_MAPPINGS = {
     "OpenAssetIOResolveImage": ResolveImage,
@@ -415,3 +580,15 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OpenAssetIOResolveImage": "OpenAssetIO Resolve Image",
     "OpenAssetIOPublishImage": "OpenAssetIO Publish Image",
 }
+
+
+class OpenAssetIOExtension(ComfyExtension):
+    async def get_node_list(self) -> list[type[io.ComfyNode]]:
+        return [
+            ResolveVideo, PublishVideo
+        ]
+
+
+async def comfy_entrypoint() -> OpenAssetIOExtension:
+    print("openassetio-comfyui: comfy_entrypoint called from nodes.py")
+    return OpenAssetIOExtension()

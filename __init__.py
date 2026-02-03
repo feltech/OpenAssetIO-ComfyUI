@@ -13,10 +13,12 @@ ComfyUI to discover the nodes contained within.
 import sys
 import pathlib
 
-__all__ = [
-    "NODE_CLASS_MAPPINGS",
-    "NODE_DISPLAY_NAME_MAPPINGS",
-]
+from comfy_api.latest import ComfyExtension, io
+
+# __all__ = [
+#     "NODE_CLASS_MAPPINGS",
+#     "NODE_DISPLAY_NAME_MAPPINGS",
+# ]
 
 __author__ = """Contributors to the OpenAssetIO project"""
 __email__ = "openassetio-discussion@lists.aswf.io"
@@ -25,5 +27,18 @@ __version__ = "1.0.0"
 # Ensure src/ is on the path so we can import from there.
 sys.path.append(str(pathlib.Path(__file__).parent / "src"))
 
-from openassetio_comfyui.nodes import NODE_CLASS_MAPPINGS
-from openassetio_comfyui.nodes import NODE_DISPLAY_NAME_MAPPINGS
+# TODO(DF): Seems v3 schema and old schema cannot coexist.
+# from openassetio_comfyui.nodes import NODE_CLASS_MAPPINGS
+# from openassetio_comfyui.nodes import NODE_DISPLAY_NAME_MAPPINGS
+from openassetio_comfyui.nodes import ResolveVideo, PublishVideo
+
+
+class OpenAssetIOExtension(ComfyExtension):
+    async def get_node_list(self) -> list[type[io.ComfyNode]]:
+        return [
+            ResolveVideo, PublishVideo
+        ]
+
+
+async def comfy_entrypoint() -> OpenAssetIOExtension:
+    return OpenAssetIOExtension()
